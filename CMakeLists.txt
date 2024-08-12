@@ -1,6 +1,7 @@
 cmake_minimum_required( VERSION 3.12 FATAL_ERROR )
 
-project( PLASMA VERSION 23.8.2 LANGUAGES C )
+project( PLASMA VERSION 24.8.7 LANGUAGES C
+    HOMEPAGE_URL "https://github.com/icl-utk-edu/plasma" DESCRIPTION "Software library for solving dense linear algebra systems using OpenMP")
 
 set(CMAKE_SUPPRESS_REGENERATION on)
 
@@ -32,9 +33,11 @@ if (CMAKE_VERSION VERSION_LESS "3.1")
   if (CMAKE_C_COMPILER_ID STREQUAL "GNU")
      set (CMAKE_C_FLAGS "-std=gnu99 ${CMAKE_C_FLAGS}")
    endif ( CMAKE_C_COMPILER_ID )
- else ( )
+else ()
    set ( CMAKE_C_STANDARD 99 )
- endif ( )
+endif ()
+
+set(BLA_PREFER_PKGCONFIG ON)  # for CMake 3.11 or newer for BLAS and 3.20+ for LAPACK
 
 # use standard module to find BLAS (calls CMake's FindThreads.cmake if necessary)
 # typically succeeds when `sgemm' is found
@@ -86,6 +89,28 @@ endif ()
 message( STATUS "BLAS(${BLAS_FOUND})" )  # linker flags `${BLA_LINKER_FLAGS}'" )
 message( STATUS "LAPACK(${LAPACK_FOUND})" )  # libraries: ${LAPACK_LIBRARIES}" )
 
+# finds new CBLAS/LAPACKE using paths and libraries for old BLAS/LAPACK
+macro(FindNewWithOld m_val m_old m_new m_inc m_lib m_dir m_root)
+  foreach( lib ${m_val} )
+    string(REPLACE "lib${m_old}" "lib${m_new}" librpl ${lib})  # Netlib has simply naming: lib$m_old and lib$m_new
+    if (EXISTS ${librpl})
+      message( STATUS "Found ${m_new} ${librpl}" )
+      list( INSERT ${m_lib} 0 "${librpl}" )  # add newly found library to $m_lib unconditionally at position 0
+      file( TO_CMAKE_PATH "${librpl}" libslh )  # turn back-slashes to slashes, even if not needed
+      string( FIND "${libslh}" "/" idx REVERSE )  # find last slash
+      if (${idx} GREATER 0)
+        string( SUBSTRING "${libslh}" 0 ${idx} dir)  # extract directory name
+        string( APPEND dir "/.." )  #  remove library directory: /path/to/blas/lib -> /path/to/blas/lib/..
+        find_path( m_header_dir "${m_new}.h" PATHS ${m_inc} ${dir} ENV ${m_dir} ${m_root} PATH_SUFFIXES include DOC "Path to ${m_new} include directory" )
+        if (m_header_dir)
+          list( INSERT ${m_inc} 0 "${m_header_dir}" )  # insert newly found header location
+          message( STATUS "Found ${m_new} header in ${m_header_dir}" )
+        endif ()
+      endif ()
+    endif ()
+  endforeach ()
+endmacro ()
+
 if (BLAS_FOUND)
   # BLA_VENDOR is the input variable to allow only checks for specific vendor BLAS
   #if ( BLA_VENDOR STREQUAL "Intel" OR BLA_VENDOR STREQUAL "Intel10_32" OR BLA_VENDOR STREQUAL "Intel10_64lp" OR BLA_VENDOR STREQUAL "Intel10_64p_seq" )
@@ -112,15 +137,19 @@ if (BLAS_FOUND)
 
   else ()
     message( STATUS "Found Generic BLAS" )
-    message( STATUS "vendor `${BLA_VENDOR}', linker flags `${BLA_LINKER_FLAGS}'" )
+    message( STATUS "Vendor `${BLA_VENDOR}', linker flags `${BLA_LINKER_FLAGS}', libs ${BLAS_LIBRARIES}" )
+    FindNewWithOld( "${BLAS_LIBRARIES}" blas cblas CBLAS_INCLUDE_DIRS CBLAS_LIBRARIES CBLAS_DIR CBLAS_ROOT)
 
     # save extra includes and set to generic CBLAS header
     set(PLASMA_CMAKE_EXTRA_INCLUDE_FILES "$CMAKE_EXTRA_INCLUDE_FILES")
     set(CMAKE_EXTRA_INCLUDE_FILES "cblas.h")
+    set( PLASMA_REQUIRED_INCLUDES "${CMAKE_REQUIRED_INCLUDES}" )  # save current value
+    set( CMAKE_REQUIRED_INCLUDES "${CBLAS_INCLUDE_DIRS}" )
 
     # check if CBLAS header defines types or enums
     include(CheckTypeSize)
     check_type_size( CBLAS_TRANSPOSE PLASMA_CBLAS_TRANSPOSE )
+
     if ( NOT HAVE_PLASMA_CBLAS_TRANSPOSE )
       check_type_size( "enum CBLAS_TRANSPOSE" PLASMA_ENUM_CBLAS_TRANSPOSE )
       if ( HAVE_PLASMA_ENUM_CBLAS_TRANSPOSE )
@@ -130,14 +159,32 @@ if (BLAS_FOUND)
       endif ()
     endif ()
     set(CMAKE_EXTRA_INCLUDE_FILES "$PLASMA_CMAKE_EXTRA_INCLUDE_FILES")
+    set( CMAKE_REQUIRED_INCLUDES "${PLASMA_REQUIRED_INCLUDES}" )  # restore old value
   endif ()
 
 endif (BLAS_FOUND)
 
 set(CMAKE_MODULE_PATH "${CMAKE_MODULE_PATH};${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
+if (CBLAS_INCLUDE_DIRS)  # save non-empty value found above
+  set( PLASMA_CBLAS_INCLUDE_DIRS "${CBLAS_INCLUDE_DIRS}" )
+endif ()
+
+if (CBLAS_LIBRARIES)  # save non-empty value found above
+  set( PLASMA_CBLAS_LIBRARIES "${CBLAS_LIBRARIES}" )
+endif ()
+
 find_package( CBLAS REQUIRED )
+
+if (NOT CBLAS_INCLUDE_DIRS)  # if the above package find failed to come up with anything
+  set( CBLAS_INCLUDE_DIRS "${PLASMA_CBLAS_INCLUDE_DIRS}" )  # restore old value
+endif ()
+
+if (NOT CBLAS_LIBRARIES)  # if the above package find failed to come up with anything
+  set( CBLAS_LIBRARIES "${PLASMA_CBLAS_LIBRARIES}" )  # restore old value
+endif ()
 include_directories(${CBLAS_INCLUDE_DIRS})
+
 if (CBLAS_PROVIDER STREQUAL "mkl")
   add_definitions(-DPLASMA_WITH_MKL)
   set(PLASMA_WITH_MKL TRUE)
@@ -146,7 +193,26 @@ elseif (CBLAS_PROVIDER STREQUAL "netlib")
   set(PLASMA_WITH_NETLIB TRUE)
 endif()
 
+FindNewWithOld( "${LAPACK_LIBRARIES}" lapack lapacke LAPACKE_INCLUDE_DIRS LAPACKE_LIBRARIES LAPACKE_DIR LAPACKE_ROOT )
+
+if (LAPACKE_INCLUDE_DIRS)  # save non-empty value found above
+  set( PLASMA_LAPACKE_INCLUDE_DIRS "${LAPACKE_INCLUDE_DIRS}" )
+endif ()
+
+if (LAPACKE_LIBRARIES)  # save non-empty value found above
+  set( PLASMA_LAPACKE_LIBRARIES "${LAPACKE_LIBRARIES}" )
+endif ()
+
 find_package( LAPACKE REQUIRED )
+
+if (NOT LAPACKE_INCLUDE_DIRS)  # if the above package find failed to come up with anything
+  set( LAPACKE_INCLUDE_DIRS "${PLASMA_LAPACKE_INCLUDE_DIRS}" )  # restore old value
+endif ()
+
+if (NOT LAPACKE_LIBRARIES)  # if the above package find failed to come up with anything
+  set( LAPACKE_LIBRARIES "${PLASMA_LAPACKE_LIBRARIES}" )  # restore old value
+endif ()
+
 include_directories(${LAPACKE_INCLUDE_DIRS})
 
 if (${CMAKE_VERSION} VERSION_GREATER 3.11.99)
@@ -266,9 +332,9 @@ compute/spbtrf.c compute/spbtrs.c compute/dlangb.c compute/clangb.c
 compute/slangb.c compute/dposv.c compute/cposv.c compute/sposv.c
 compute/dpoinv.c compute/cpoinv.c compute/spoinv.c compute/dpotri.c
 compute/cpotri.c compute/spotri.c
-compute/slaebz2.c compute/dlaebz2.c 
-compute/slaneg2.c compute/dlaneg2.c 
-compute/sstevx2.c compute/dstevx2.c 
+compute/slaebz2.c compute/dlaebz2.c
+compute/slaneg2.c compute/dlaneg2.c
+compute/sstevx2.c compute/dstevx2.c
 compute/pslange.c compute/pclaset.c compute/psorglq_tree.c
 compute/psormqr_tree.c compute/pdgelqf_tree.c compute/pslag2d.c
 compute/pcunmqr_tree.c compute/psgeqrf_tree.c compute/pspotrf.c
@@ -396,7 +462,7 @@ core_blas/core_cgbtype1cb.c  core_blas/core_dgbtype1cb.c  core_blas/core_sgbtype
 core_blas/core_cgbtype2cb.c  core_blas/core_dgbtype2cb.c  core_blas/core_sgbtype2cb.c  core_blas/core_zgbtype2cb.c
 core_blas/core_cgbtype3cb.c  core_blas/core_dgbtype3cb.c  core_blas/core_sgbtype3cb.c  core_blas/core_zgbtype3cb.c
 core_blas/core_clarfb_gemm.c core_blas/core_dlarfb_gemm.c core_blas/core_slarfb_gemm.c core_blas/core_zlarfb_gemm.c
-core_blas/core_clacpy.c core_blas/core_dlacpy.c core_blas/core_slacpy.c core_blas/core_zlacpy.c 
+core_blas/core_clacpy.c core_blas/core_dlacpy.c core_blas/core_slacpy.c core_blas/core_zlacpy.c
 )
 
 target_include_directories(plasma_core_blas PUBLIC
@@ -478,9 +544,31 @@ target_include_directories(plasmatest PUBLIC
 	$<INSTALL_INTERFACE:include>
 )
 
+set_target_properties( plasma_core_blas plasma PROPERTIES VERSION ${CMAKE_PROJECT_VERSION} SOVERSION 1.0)
+
 configure_file( include/plasma_config.hin ${CMAKE_CURRENT_SOURCE_DIR}/include/plasma_config.h @ONLY NEWLINE_STYLE LF )
 
-install(TARGETS plasma plasma_core_blas LIBRARY DESTINATION lib ARCHIVE DESTINATION lib)
+include(GNUInstallDirs)
+
+install(TARGETS plasma plasma_core_blas EXPORT plasmaTargets LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR} ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR} INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 file( GLOB plasma_headers include/plasma*.h)
-install(FILES ${plasma_headers} DESTINATION include)
-install(TARGETS plasmatest RUNTIME DESTINATION bin)
+install(FILES ${plasma_headers} DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(TARGETS plasmatest EXPORT plasmaTargets RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+
+# generage config files for upstream CMake projects
+include(CMakePackageConfigHelpers)
+
+write_basic_package_version_file( "${CMAKE_CURRENT_BINARY_DIR}/plasmaExport/plasmaConfigVersion.cmake" VERSION ${PLASMA_VERSION} COMPATIBILITY AnyNewerVersion )
+
+export(EXPORT plasmaTargets FILE "${CMAKE_CURRENT_BINARY_DIR}/plasmaExport/plasmaTargets.cmake" NAMESPACE plasma::)
+
+configure_file( ${PROJECT_SOURCE_DIR}/share/cmake/plasma.cmakein "${CMAKE_CURRENT_BINARY_DIR}/plasmaExport/plasmaConfig.cmake" @ONLY )
+install( EXPORT plasmaTargets FILE plasmaTargets.cmake NAMESPACE plasma:: DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/plasma NAMESPACE plasma:: CONFIGURATIONS Debug Release RelWithDebInfo MinSizeRel )
+
+install( FILES "${CMAKE_CURRENT_BINARY_DIR}/plasmaExport/plasmaConfig.cmake" "${CMAKE_CURRENT_BINARY_DIR}/plasmaExport/plasmaConfigVersion.cmake" DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/plasma )
+
+# generate pkg-config .pc file from a template
+string(TOLOWER ${PROJECT_NAME} lproj)
+string(REPLACE ";" "\ " plasma_libs_spaced "${PLASMA_LIBRARIES}")
+configure_file( ${CMAKE_CURRENT_SOURCE_DIR}/share/pkgconfig/${lproj}.pcin ${CMAKE_CURRENT_BINARY_DIR}/${lproj}.pc @ONLY NEWLINE_STYLE LF )
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/${lproj}.pc DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig)
